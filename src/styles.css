@@ -80,6 +80,11 @@ button, input, textarea { font: inherit; }
 .reply b { flex: none; color: #7b3f2f; }
 .reply-box { display: flex; margin-top: 8px; }
 .decision-row { display: flex; gap: 6px; margin-top: 9px; }
+.merge-row { display: flex; align-items: center; gap: 6px; margin-top: 9px; padding-top: 8px; border-top: 1px dashed #e2d9cf; }
+.merge-row .ant-select { flex: 1; min-width: 0; }
+.merge-label { flex: none; color: #8a7d72; font-size: 10px; }
+.merge-trace { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 7px; padding: 6px 8px; border-radius: 6px; background: #eef0f8; color: #565c85; font-size: 10px; }
+.merge-trace .ant-btn { padding: 0 2px; height: auto; font-size: 10px; }
 .comments-panel > .keyboard-hint { position: fixed; right: 0; bottom: 0; width: 400px; z-index: 6; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 12px; color: #9e9287; background: rgba(40,35,31,.96); font-size: 9px; }
 kbd { padding: 1px 4px; border: 1px solid #706158; border-radius: 3px; color: #f5e7d7; background: #50453d; }
 .compare-selectors { display: grid; grid-template-columns: 1fr 30px 1fr; align-items: center; gap: 10px; margin-bottom: 14px; text-align: center; }

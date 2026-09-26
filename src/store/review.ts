@@ -17,8 +17,11 @@ const baseComments: Comment[] = [
   { id: 'c-01', paragraphId: 'p-02', author: '审稿人 A', role: 'reviewer', type: 'suggestion', quote: '其真实维护工作流中的影响', body: '建议把“影响”具体化为可观察指标。', suggestion: '近年来，大型语言模型被广泛用于代码生成与缺陷定位，但在真实维护工作流中究竟改变了哪些协作行为，仍缺少系统证据。', status: 'open', replies: [{ id: 'r-01', author: '作者', role: 'author', body: '可以，修改后会补充指标定义。', createdAt: Date.now() - 7200000 }], createdAt: Date.now() - 86400000 },
   { id: 'c-02', paragraphId: 'p-02', author: '审稿人 B', role: 'reviewer', type: 'comment', quote: '缺少系统证据', body: '这里的“系统证据”范围过大，建议限定为本研究覆盖的议题语料。', status: 'open', replies: [], createdAt: Date.now() - 64000000 },
   { id: 'c-03', paragraphId: 'p-03', author: '审稿人 A', role: 'reviewer', type: 'comment', quote: '26 位核心维护者', body: '请说明抽样方式和地域分布，避免样本选择偏差。', status: 'open', replies: [], createdAt: Date.now() - 54000000 },
-  { id: 'c-04', paragraphId: 'p-04', author: '审稿人 C', role: 'reviewer', type: 'comment', quote: '两名研究者独立完成', body: '建议报告编码者间一致性系数，并明确不一致处理规则。', status: 'open', replies: [], createdAt: Date.now() - 48000000 },
+  { id: 'c-07', paragraphId: 'p-03', author: '审稿人 C', role: 'reviewer', type: 'comment', quote: '26 位核心维护者', body: '与审稿人 A 重复：同样要求补充抽样框、回复率与地域分布。', status: 'open', replies: [], createdAt: Date.now() - 50000000 },
+  { id: 'c-04', paragraphId: 'p-04', author: '审稿人 C', role: 'reviewer', type: 'comment', quote: '两名研究者独立完成', body: '建议报告编码者间一致性系数，并明确不一致处理规则。', status: 'open', replies: [{ id: 'r-02', author: '审稿人 D', role: 'reviewer', body: '附议，一致性系数建议报告 Krippendorff α。', createdAt: Date.now() - 46000000 }], createdAt: Date.now() - 48000000 },
+  { id: 'c-09', paragraphId: 'p-04', author: '审稿人 D', role: 'reviewer', type: 'comment', quote: '两名研究者独立完成', body: '重复意见：同样要求报告编码者间一致性。', status: 'merged', replies: [], createdAt: Date.now() - 47000000, mergedInto: 'c-04' },
   { id: 'c-05', paragraphId: 'p-05', author: '审稿人 D', role: 'reviewer', type: 'comment', quote: '邀请第三位研究者裁决', body: '与上一段重复：都在说明编码分歧如何解决，建议合并意见。', status: 'open', replies: [], createdAt: Date.now() - 43000000 },
+  { id: 'c-08', paragraphId: 'p-02', author: '审稿人 D', role: 'reviewer', type: 'suggestion', quote: '其真实维护工作流中的影响', body: '与审稿人 A 引用同一段原文，但建议改写方向不同。', suggestion: '近年来，大型语言模型被广泛用于代码生成与缺陷定位，但其对真实维护工作流中评审效率与沟通成本的影响仍缺少系统证据。', status: 'open', replies: [], createdAt: Date.now() - 40000000 },
   { id: 'c-06', paragraphId: 'p-06', author: '审稿人 B', role: 'reviewer', type: 'suggestion', quote: '但没有显著降低维护者处理复杂议题的认知负担', body: '“显著”需要给出统计检验与效应量。', suggestion: '初步结果显示，辅助工具缩短了首次响应时间，但对复杂议题处理时长与自我报告认知负担均未产生统计显著影响。', status: 'open', replies: [], createdAt: Date.now() - 36000000 },
 ]
 const seed = typeof localStorage !== 'undefined' ? localStorage.getItem(DRAFT_KEY) : null
@@ -34,6 +37,30 @@ const persistDraft = (paragraphs: Paragraph[], comments: Comment[], versions: Ve
   localStorage.setItem(DRAFT_KEY, JSON.stringify({ paragraphs, comments, versions }))
 }
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+
+export type MergeResult = { ok: true } | { ok: false; reason: string }
+
+export const normalizeQuote = (value: string) => value.replace(/\s+/g, ' ').trim()
+
+// 合并前核对：同段落、引用原文一致、修改文字一致、段落未锁定、双方均待处理
+const mergeBlockReason = (source: Comment, target: Comment, paragraphs: Paragraph[]): string | null => {
+  if (source.id === target.id) return '同一条意见不能与自己合并'
+  if (source.paragraphId !== target.paragraphId) return '两条意见不在同一段落'
+  if (normalizeQuote(source.quote) !== normalizeQuote(target.quote)) return '引用原文不同'
+  if ((source.suggestion ?? '').trim() !== (target.suggestion ?? '').trim()) return '修改文字不一致'
+  const paragraph = paragraphs.find((item) => item.id === source.paragraphId)
+  if (paragraph?.status === 'locked') return '段落已锁定'
+  if (source.status !== 'open' || target.status !== 'open') return '仅待处理的意见可以合并'
+  return null
+}
+
+// 段落正文被改过时，已完成的合并组退回待处理（由保留意见代表整组重新打开）
+const reopenMergedGroups = (comments: Comment[], paragraphId: string, exceptId?: string): Comment[] => {
+  const groupHeads = new Set(comments.filter((comment) => comment.mergedInto).map((comment) => comment.mergedInto as string))
+  return comments.map((comment) => comment.id !== exceptId && comment.paragraphId === paragraphId && groupHeads.has(comment.id) && (comment.status === 'accepted' || comment.status === 'rejected')
+    ? { ...comment, status: 'open' as const }
+    : comment)
+}
 
 interface ReviewState {
   role: Role
@@ -55,7 +82,7 @@ interface ReviewState {
   addComment: (input: Pick<Comment, 'paragraphId' | 'type' | 'quote' | 'body' | 'suggestion'>) => void
   replyComment: (commentId: string, body: string) => void
   resolveSuggestion: (commentId: string, accepted: boolean) => void
-  mergeComment: (commentId: string, targetId: string) => void
+  mergeComment: (commentId: string, targetId: string) => MergeResult
   toggleLock: (paragraphId: string) => void
   createVersion: (label: string) => void
   addConflict: (conflict: EditConflict) => void
@@ -94,11 +121,16 @@ export const useReviewStore = create<ReviewState>((set, get) => {
     selectParagraph: (selectedParagraphId) => set({ selectedParagraphId }),
     setCommentFilter: (commentFilter) => set({ commentFilter }),
     setRevisionMode: (revisionMode) => set({ revisionMode }),
-    updateParagraph: (paragraphId, text) => record((state) => ({
-      paragraphs: state.paragraphs.map((paragraph) => paragraph.id === paragraphId && paragraph.status !== 'locked'
-        ? { ...paragraph, text, status: 'open' as const, highlighted: true }
-        : paragraph),
-    })),
+    updateParagraph: (paragraphId, text) => record((state) => {
+      const paragraph = state.paragraphs.find((item) => item.id === paragraphId)
+      const changed = !!paragraph && paragraph.status !== 'locked' && paragraph.text !== text
+      return {
+        paragraphs: state.paragraphs.map((item) => item.id === paragraphId && item.status !== 'locked'
+          ? { ...item, text, status: 'open' as const, highlighted: true }
+          : item),
+        comments: changed ? reopenMergedGroups(state.comments, paragraphId) : state.comments,
+      }
+    }),
     addComment: (input) => record((state) => ({
       comments: [{
         ...input,
@@ -110,24 +142,47 @@ export const useReviewStore = create<ReviewState>((set, get) => {
         createdAt: Date.now(),
       }, ...state.comments],
     })),
-    replyComment: (commentId, body) => record((state) => ({
-      comments: state.comments.map((comment) => comment.id === commentId ? {
-        ...comment,
-        replies: [...comment.replies, { id: id('reply'), author: state.role === 'author' ? '作者' : state.role === 'reviewer' ? '审稿人 A' : '编辑', role: state.role, body, createdAt: Date.now() } as Reply],
-      } : comment),
-    })),
+    replyComment: (commentId, body) => record((state) => {
+      const target = state.comments.find((comment) => comment.id === commentId)
+      // 已合并的意见，回复跟随到保留意见上
+      const effectiveId = target?.status === 'merged' && target.mergedInto ? target.mergedInto : commentId
+      return {
+        comments: state.comments.map((comment) => comment.id === effectiveId ? {
+          ...comment,
+          replies: [...comment.replies, { id: id('reply'), author: state.role === 'author' ? '作者' : state.role === 'reviewer' ? '审稿人 A' : '编辑', role: state.role, body, createdAt: Date.now() } as Reply],
+        } : comment),
+      }
+    }),
     resolveSuggestion: (commentId, accepted) => record((state) => {
       const comment = state.comments.find((item) => item.id === commentId)
+      const paragraph = comment ? state.paragraphs.find((item) => item.id === comment.paragraphId) : undefined
+      const appliesText = !!(comment?.suggestion && accepted && paragraph && paragraph.text !== comment.suggestion)
+      const resolved = state.comments.map((item) => item.id === commentId ? { ...item, status: accepted ? 'accepted' as const : 'rejected' as const } : item)
       return {
-        comments: state.comments.map((item) => item.id === commentId ? { ...item, status: accepted ? 'accepted' : 'rejected' } : item),
+        // 接受建议会改动段落正文，同段落其他已完成的合并组退回待处理（本组除外）
+        comments: appliesText && comment ? reopenMergedGroups(resolved, comment.paragraphId, commentId) : resolved,
         paragraphs: comment?.suggestion && accepted
-          ? state.paragraphs.map((paragraph) => paragraph.id === comment.paragraphId ? { ...paragraph, text: comment.suggestion as string, status: 'accepted' } : paragraph)
+          ? state.paragraphs.map((item) => item.id === comment.paragraphId ? { ...item, text: comment.suggestion as string, status: 'accepted' } : item)
           : state.paragraphs,
       }
     }),
-    mergeComment: (commentId, targetId) => record((state) => ({
-      comments: state.comments.map((comment) => comment.id === commentId ? { ...comment, status: 'merged', mergedInto: targetId } : comment),
-    })),
+    mergeComment: (commentId, targetId) => {
+      const state = get()
+      const source = state.comments.find((comment) => comment.id === commentId)
+      const target = state.comments.find((comment) => comment.id === targetId)
+      if (!source || !target) return { ok: false as const, reason: '意见不存在或已被移除' }
+      const reason = mergeBlockReason(source, target, state.paragraphs)
+      if (reason) return { ok: false as const, reason }
+      // 合并只改状态：来源意见标记 merged 并记录并入去向，回复随合并转移到保留意见
+      record((current) => ({
+        comments: current.comments.map((comment) => {
+          if (comment.id === commentId) return { ...comment, status: 'merged' as const, mergedInto: targetId, replies: [] }
+          if (comment.id === targetId) return { ...comment, replies: [...comment.replies, ...source.replies].sort((a, b) => a.createdAt - b.createdAt) }
+          return comment
+        }),
+      }))
+      return { ok: true as const }
+    },
     toggleLock: (paragraphId) => record((state) => ({
       paragraphs: state.paragraphs.map((paragraph) => paragraph.id === paragraphId ? {
         ...paragraph,
@@ -140,10 +195,13 @@ export const useReviewStore = create<ReviewState>((set, get) => {
     addConflict: (conflict) => set((state) => ({ conflicts: [conflict, ...state.conflicts] })),
     resolveConflict: (conflictId, strategy) => record((state) => {
       const conflict = state.conflicts.find((item) => item.id === conflictId)
+      const current = conflict ? state.paragraphs.find((item) => item.id === conflict.paragraphId) : undefined
+      const appliesRemote = !!conflict && strategy === 'remote' && !!current && current.text !== conflict.remoteText
       return {
         paragraphs: conflict && strategy === 'remote'
           ? state.paragraphs.map((paragraph) => paragraph.id === conflict.paragraphId ? { ...paragraph, text: conflict.remoteText, highlighted: true } : paragraph)
           : state.paragraphs,
+        comments: appliesRemote && conflict ? reopenMergedGroups(state.comments, conflict.paragraphId) : state.comments,
         conflicts: state.conflicts.filter((item) => item.id !== conflictId),
       }
     }),
