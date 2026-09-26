@@ -24,6 +24,10 @@ export interface Comment {
   replies: Reply[]
   createdAt: number
   mergedInto?: string
+  /** 代表意见处理整组时所依据的段落正文；正文偏离该值则整组退回待处理 */
+  basisText?: string
+  /** 是否因段落正文被改动而从已处理状态退回 */
+  reopened?: boolean
 }
 
 export interface Paragraph {

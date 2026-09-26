@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowLeftOutlined, ArrowRightOutlined, BranchesOutlined, CheckOutlined, CloseOutlined,
-  CommentOutlined, DiffOutlined, DeleteOutlined, FileDoneOutlined, FileTextOutlined,
+  CommentOutlined, DiffOutlined, DeleteOutlined, DownOutlined, FileDoneOutlined, FileTextOutlined,
   HistoryOutlined, LockOutlined, MenuFoldOutlined, MessageOutlined, PlusOutlined,
   RedoOutlined, SaveOutlined, SendOutlined, SwapOutlined, UndoOutlined, UnlockOutlined, UserSwitchOutlined,
 } from '@ant-design/icons'
-import { Alert, Badge, Button, Card, Checkbox, Divider, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, message } from 'antd'
+import { Alert, Badge, Button, Card, Checkbox, Divider, Dropdown, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, message } from 'antd'
 import { submitRemotePatch } from './services/mockApi'
-import { useReviewStore } from './store/review'
+import { groupKey, useReviewStore } from './store/review'
 import type { Comment, CommentType, Paragraph, Role } from './types'
 
 const roleMeta: Record<Role, { label: string; description: string; color: string }> = {
@@ -38,17 +38,57 @@ export default function App() {
 
   const selected = paragraphs.find((paragraph) => paragraph.id === selectedParagraphId) ?? paragraphs[0]
   const sections = useMemo(() => Array.from(new Set(paragraphs.map((paragraph) => paragraph.section))), [paragraphs])
-  const paragraphCommentCounts = useMemo(() => comments.reduce<Record<string, number>>((acc, comment) => {
+  // 被并入的意见不再代表任何待办，只保留去向可翻看
+  const effectiveComments = useMemo(() => comments.filter((comment) => comment.status !== 'merged'), [comments])
+  const paragraphCommentCounts = useMemo(() => effectiveComments.reduce<Record<string, number>>((acc, comment) => {
     acc[comment.paragraphId] = (acc[comment.paragraphId] ?? 0) + 1
     return acc
+  }, {}), [effectiveComments])
+  // 重复判定：同一段落 + 引用原文对得上，且各自仍待处理；其他意见各算一条
+  const duplicateKeys = useMemo(() => {
+    const tally = new Map<string, number>()
+    for (const comment of comments) {
+      if (comment.status !== 'open') continue
+      const key = groupKey(comment)
+      tally.set(key, (tally.get(key) ?? 0) + 1)
+    }
+    return new Set(Array.from(tally).filter(([, count]) => count > 1).map(([key]) => key))
+  }, [comments])
+  const mergedByTarget = useMemo(() => comments.reduce<Record<string, Comment[]>>((acc, comment) => {
+    if (comment.status === 'merged' && comment.mergedInto) (acc[comment.mergedInto] ??= []).push(comment)
+    return acc
   }, {}), [comments])
-  const duplicateParagraphIds = useMemo(() => new Set(Object.entries(paragraphCommentCounts).filter(([, count]) => count > 1).map(([id]) => id)), [paragraphCommentCounts])
+  const commentLabel = (comment: Comment) => `${comment.author}（${comment.quote.slice(0, 12) || '无引用'}…）`
   const visibleComments = useMemo(() => comments.filter((comment) => {
     if (commentFilter === 'open') return comment.status === 'open'
     if (commentFilter === 'suggestion') return comment.type === 'suggestion' && comment.status === 'open'
-    if (commentFilter === 'duplicate') return duplicateParagraphIds.has(comment.paragraphId) && comment.status === 'open'
+    if (commentFilter === 'duplicate') return comment.status === 'open' && duplicateKeys.has(groupKey(comment))
     return true
-  }).sort((a, b) => b.createdAt - a.createdAt), [commentFilter, comments, duplicateParagraphIds])
+  }).sort((a, b) => b.createdAt - a.createdAt), [commentFilter, comments, duplicateKeys])
+
+  const scrollToComment = (targetId: string) => {
+    const target = comments.find((comment) => comment.id === targetId)
+    if (target) scrollToParagraph(target.paragraphId)
+    document.getElementById(`comment-${targetId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+  const handleMerge = (source: Comment, target: Comment) => {
+    const result = mergeComment(source.id, target.id)
+    if (result.ok) {
+      message.success(`已并入 ${target.author} 的意见，回复已一并迁移；该条代表整组`)
+      return
+    }
+    // 合并不了：写明卡在哪两条
+    const which = `「${source.author} ↔ ${target.author}（引用“${source.quote.slice(0, 10) || '无'}”）」`
+    const reasonText = {
+      missing: '找不到要合并的意见',
+      self: '不能并入自己',
+      quote: '引用原文对不上，按引用它们各算一条',
+      suggestion: '两条建议改为的文字不一致，不能合并',
+      locked: '该段落已锁定，需先由编辑解锁',
+      state: '其中一条已不在待处理状态',
+    }[result.reason ?? 'missing']
+    message.error({ content: `无法合并 ${which}：${reasonText}`, duration: 4 })
+  }
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -249,24 +289,92 @@ export default function App() {
           <div className="comment-list">
             {visibleComments.map((comment) => {
               const paragraph = paragraphs.find((item) => item.id === comment.paragraphId)
+              const mergedIntoComment = comment.mergedInto ? comments.find((item) => item.id === comment.mergedInto) : undefined
+              const mergedMembers = mergedByTarget[comment.id] ?? []
+              const sameParagraphOpen = comments
+                .filter((item) => item.id !== comment.id && item.paragraphId === comment.paragraphId && item.status === 'open')
+                .sort((a, b) => Number(a.quote !== comment.quote) - Number(b.quote !== comment.quote) || a.createdAt - b.createdAt)
+              const mergeMenu = {
+                items: sameParagraphOpen.map((sibling) => {
+                  const sameQuote = sibling.quote === comment.quote
+                  const sameSuggestion = (sibling.suggestion ?? '') === (comment.suggestion ?? '')
+                  const locked = paragraph?.status === 'locked'
+                  const blockers = [
+                    !sameQuote && '引用不同',
+                    !sameSuggestion && '修改文字不一致',
+                    locked && '段落已锁定',
+                  ].filter(Boolean).join('·')
+                  return {
+                    key: sibling.id,
+                    label: `${commentLabel(sibling)}${blockers ? `　⚠ ${blockers}` : '　可合并'}`,
+                  }
+                }),
+                onClick: ({ key }: { key: string }) => {
+                  const sibling = sameParagraphOpen.find((item) => item.id === key)
+                  if (sibling) handleMerge(comment, sibling)
+                },
+              }
               return (
-                <Card key={comment.id} size="small" className={`comment-card ${comment.status}`} title={<span>{comment.author} <Tag>{comment.type === 'suggestion' ? '修改建议' : '段落批注'}</Tag></span>} extra={<small>{formatDate(comment.createdAt)}</small>}>
+                <Card
+                  key={comment.id} id={`comment-${comment.id}`} size="small"
+                  className={`comment-card ${comment.status}`}
+                  title={<span>{comment.author} <Tag>{comment.type === 'suggestion' ? '修改建议' : '段落批注'}</Tag>{mergedMembers.length > 0 && <Tag color="geekblue">代表整组 · {mergedMembers.length + 1} 条</Tag>}</span>}
+                  extra={<small>{formatDate(comment.createdAt)}</small>}
+                >
                   <button className="quote-line" onClick={() => paragraph && scrollToParagraph(paragraph.id)}>“{comment.quote}” · 段落 {paragraph?.number}</button>
                   <p className="comment-body">{comment.body}</p>
                   {comment.suggestion && <div className="suggestion-box"><small>建议改为</small><p>{comment.suggestion}</p></div>}
-                  {comment.status !== 'open' && <Tag color={comment.status === 'accepted' ? 'green' : comment.status === 'rejected' ? 'red' : 'blue'}>{comment.status === 'accepted' ? '已接受' : comment.status === 'rejected' ? '已拒绝' : '已合并'}</Tag>}
-                  <div className="replies">
-                    {comment.replies.map((reply) => <div key={reply.id} className="reply"><b>{reply.author}</b><span>{reply.body}</span></div>)}
-                  </div>
-                  <div className="reply-box">
-                    <Input size="small" value={replyDrafts[comment.id] ?? ''} onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: event.target.value }))} placeholder="回复讨论…" onPressEnter={() => { const body = replyDrafts[comment.id]?.trim(); if (body) { replyComment(comment.id, body); setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: '' })) } }} />
-                    <Button size="small" type="text" icon={<SendOutlined />} onClick={() => { const body = replyDrafts[comment.id]?.trim(); if (body) { replyComment(comment.id, body); setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: '' })) } }} />
-                  </div>
-                  {comment.status === 'open' && role === 'author' && comment.type === 'suggestion' && <div className="decision-row"><Button type="primary" size="small" icon={<CheckOutlined />} onClick={() => resolveSuggestion(comment.id, true)}>接受修改</Button><Button danger size="small" icon={<CloseOutlined />} onClick={() => resolveSuggestion(comment.id, false)}>拒绝</Button></div>}
-                  {comment.status === 'open' && role === 'editor' && duplicateParagraphIds.has(comment.paragraphId) && (() => {
-                    const sibling = comments.find((item) => item.id !== comment.id && item.paragraphId === comment.paragraphId && item.status === 'open')
-                    return sibling ? <Button size="small" type="dashed" icon={<BranchesOutlined />} onClick={() => mergeComment(comment.id, sibling.id)}>合并到“{sibling.author}”意见</Button> : null
-                  })()}
+                  {comment.status !== 'open' && (
+                    <Space size={4} wrap>
+                      <Tag color={comment.status === 'accepted' ? 'green' : comment.status === 'rejected' ? 'red' : 'blue'}>{comment.status === 'accepted' ? '已接受（整组完成）' : comment.status === 'rejected' ? '已拒绝（整组完成）' : '已合并'}</Tag>
+                      {comment.reopened && <Tag color="orange">段落正文已改动，整组退回待处理</Tag>}
+                    </Space>
+                  )}
+                  {comment.reopened && comment.status === 'open' && <div className="reopen-row"><Tag color="orange">段落正文已改动，整组退回待处理</Tag></div>}
+
+                  {comment.status === 'merged' ? (
+                    <div className="merged-note">
+                      <BranchesOutlined /> 已并入
+                      {mergedIntoComment ? (
+                        <Button type="link" size="small" onClick={() => scrollToComment(mergedIntoComment.id)}>
+                          {mergedIntoComment.author}的保留意见{mergedIntoComment.status !== 'open' ? `（${mergedIntoComment.status === 'accepted' ? '已接受' : '已拒绝'}）` : ''}
+                        </Button>
+                      ) : <span>（保留意见已删除）</span>}
+                      <span className="merged-hint">原文可在此翻看，回复与处理请前往保留条</span>
+                    </div>
+                  ) : (
+                    <>
+                      {mergedMembers.length > 0 && (
+                        <div className="merged-members">
+                          <small>并入本组的 {mergedMembers.length} 条（回复已迁移到本条）：</small>
+                          {mergedMembers.map((member) => (
+                            <div key={member.id} className="merged-member">
+                              <b>{member.author}</b>
+                              <span>“{member.quote}” {member.body}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="replies">
+                        {comment.replies.map((reply) => <div key={reply.id} className="reply"><b>{reply.author}</b><span>{reply.body}</span></div>)}
+                      </div>
+                      <div className="reply-box">
+                        <Input size="small" value={replyDrafts[comment.id] ?? ''} onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: event.target.value }))} placeholder="回复讨论（整组可见）…" onPressEnter={() => { const body = replyDrafts[comment.id]?.trim(); if (body) { replyComment(comment.id, body); setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: '' })) } }} />
+                        <Button size="small" type="text" icon={<SendOutlined />} onClick={() => { const body = replyDrafts[comment.id]?.trim(); if (body) { replyComment(comment.id, body); setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: '' })) } }} />
+                      </div>
+                      {comment.status === 'open' && role === 'author' && comment.type === 'suggestion' && <div className="decision-row"><Button type="primary" size="small" icon={<CheckOutlined />} onClick={() => resolveSuggestion(comment.id, true)}>接受修改（整组完成）</Button><Button danger size="small" icon={<CloseOutlined />} onClick={() => resolveSuggestion(comment.id, false)}>拒绝（整组完成）</Button></div>}
+                      {comment.status === 'open' && role === 'editor' && sameParagraphOpen.length > 0 && (
+                        <div className="decision-row">
+                          <Dropdown menu={mergeMenu} trigger={['click']}>
+                            <Button size="small" type="dashed" icon={<BranchesOutlined />}>合并到另一条 <DownOutlined /></Button>
+                          </Dropdown>
+                          {duplicateKeys.has(groupKey(comment))
+                            ? <Tag color="geekblue">引用相同，可合并为一组</Tag>
+                            : <Tag>引用不同，各算一条（尝试合并会被拦下）</Tag>}
+                        </div>
+                      )}
+                    </>
+                  )}
                 </Card>
               )
             })}
